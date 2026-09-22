@@ -61,18 +61,12 @@ Interactive docs: http://localhost:8000/docs
 | POST | `/ask` | `{"question": "...", "doc_ids": ["..."]}` returns the answer and sources |
 | GET | `/health` | Passage count, storage location, whether a Gemini key is set |
 
-## Tests
-
-```
-pip install pytest
-python -m pytest
-```
 
 The tests cover the PDF reading and chunking. They need only `pypdf`.
 
 ## Project layout
 
-```
+
 app/
   main.py      routes and startup
   library.py   embeddings + Qdrant (add, search, list, delete)
@@ -80,7 +74,7 @@ app/
   llm.py       prompt and Gemini call
   config.py    settings
 static/index.html   the web page
-```
+
 
 ## Limits
 
