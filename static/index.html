@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Qdrant PDF Q&amp;A</title>
+  <style>
+    :root { --ink: #17232b; --muted: #5a6b76; --line: #d6dee3; --bg: #f3f6f7; --accent: #0f766e; --accent-dark: #0b5a54; --error: #b3261e; --wash: #e4f2f0; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    main { max-width: 50rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+    h1 { margin: 0 0 .2rem; font-size: 1.7rem; }
+    h2 { margin: 0 0 .7rem; font-size: 1.05rem; }
+    .sub { margin: 0 0 1.5rem; color: var(--muted); }
+    .panel { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 1.1rem 1.2rem; margin-bottom: 1rem; }
+    .banner { background: #fdecea; border-left: 4px solid var(--error); color: #5c1410; padding: .7rem 1rem; border-radius: 0 8px 8px 0; margin-bottom: 1rem; }
+    .drop { display: block; padding: 1.1rem; border: 2px dashed var(--line); border-radius: 8px; text-align: center; color: var(--muted); cursor: pointer; }
+    .drop:hover, .drop.over { border-color: var(--accent); color: var(--accent-dark); background: var(--wash); }
+    .drop:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+    input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+    ul.docs { list-style: none; margin: .9rem 0 0; padding: 0; }
+    ul.docs li { display: flex; align-items: center; gap: .7rem; padding: .5rem 0; border-top: 1px solid var(--line); }
+    ul.docs label { display: flex; align-items: center; gap: .6rem; flex: 1; min-width: 0; cursor: pointer; }
+    ul.docs .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .meta { color: var(--muted); font-size: .85rem; white-space: nowrap; }
+    .empty { margin: .9rem 0 0; color: var(--muted); }
+    textarea { width: 100%; padding: .7rem; border: 1px solid var(--line); border-radius: 8px; font: inherit; resize: vertical; }
+    button { padding: .55rem 1.1rem; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+    button:hover:not(:disabled) { background: var(--accent-dark); }
+    button.plain { background: none; color: var(--muted); font-weight: 400; padding: .2rem .5rem; }
+    button.plain:hover:not(:disabled) { background: none; color: var(--error); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .row { display: flex; align-items: center; gap: .8rem; margin-top: .6rem; flex-wrap: wrap; }
+    .msg { margin: .6rem 0 0; min-height: 1.3rem; font-size: .9rem; color: var(--muted); }
+    .msg.error { color: var(--error); } .msg.ok { color: var(--accent-dark); }
+    .q { margin: 0 0 .5rem; font-weight: 600; overflow-wrap: anywhere; }
+    .a p { margin: 0 0 .7rem; } .a ul { margin: 0 0 .7rem; padding-left: 1.3rem; } .a > :last-child { margin-bottom: 0; }
+    .a code { background: #eef2f4; padding: .1em .3em; border-radius: 4px; }
+    .a.failed { color: var(--error); }
+    .sources { margin-top: .9rem; border-top: 1px solid var(--line); padding-top: .7rem; font-size: .9rem; }
+    .sources summary { cursor: pointer; font-weight: 600; }
+    .src { margin: .6rem 0 0; }
+    .src .excerpt { margin: .2rem 0 0 1.6rem; color: var(--muted); white-space: pre-line; overflow-wrap: anywhere; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Qdrant PDF Q&amp;A</h1>
+  <p class="sub">Add PDFs to your library, then ask questions across them.</p>
+
+  <div class="banner" id="banner" hidden></div>
+
+  <section class="panel">
+    <h2>Library</h2>
+    <label class="drop" id="drop">
+      <span>Drop PDFs here or click to choose files</span>
+      <input type="file" id="file" accept=".pdf,application/pdf" multiple>
+    </label>
+    <p class="msg" id="upload-msg" role="status"></p>
+    <ul class="docs" id="docs"></ul>
+    <p class="empty" id="empty">No documents yet. Add a PDF to begin.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Ask a question</h2>
+    <textarea id="question" rows="3" aria-label="Your question" placeholder="What do these documents say about…?"></textarea>
+    <div class="row">
+      <button id="ask" type="button">Ask</button>
+      <span class="meta" id="scope"></span>
+    </div>
+    <p class="msg" id="ask-msg" role="status"></p>
+  </section>
+
+  <section id="answers" aria-label="Answers"></section>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let docs = [];
+  const skipped = new Set(); // documents the user unticked
+
+  function escapeHtml(text) {
+    return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  // Small Markdown subset (bold, code, bullets). Text is escaped first, so the result is safe.
+  function renderMarkdown(text) {
+    const inline = (s) => s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`(.+?)`/g, "<code>$1</code>");
+    let html = "", inList = false;
+    for (const line of escapeHtml(text).split("\n")) {
+      const item = line.match(/^\s*[-*]\s+(.*)/);
+      if (item) {
+        if (!inList) { html += "<ul>"; inList = true; }
+        html += `<li>${inline(item[1])}</li>`;
+      } else {
+        if (inList) { html += "</ul>"; inList = false; }
+        if (line.trim()) html += `<p>${inline(line)}</p>`;
+      }
+    }
+    return html + (inList ? "</ul>" : "");
+  }
+
+  async function call(path, options) {
+    const res = await fetch(path, options);
+    let body = null;
+    try { body = await res.json(); } catch (_) {}
+    if (!res.ok) {
+      const d = body && body.detail;
+      throw new Error(typeof d === "string" ? d : Array.isArray(d) ? d.map((x) => x.msg).join("; ") : `Request failed (${res.status})`);
+    }
+    return body;
+  }
+
+  function setMsg(id, text, kind) {
+    $(id).textContent = text || "";
+    $(id).className = "msg" + (kind ? " " + kind : "");
+  }
+
+  /* ---------- library ---------- */
+
+  async function checkHealth() {
+    try {
+      const h = await call("/health");
+      $("banner").hidden = h.gemini_configured;
+      if (!h.gemini_configured) $("banner").textContent = "GEMINI_API_KEY is not set. You can add PDFs, but asking questions needs the key. Set it and restart the server.";
+    } catch (err) {
+      $("banner").hidden = false;
+      $("banner").textContent = "Cannot reach the server: " + err.message;
+    }
+  }
+
+  function selectedIds() { return docs.filter((d) => !skipped.has(d.doc_id)).map((d) => d.doc_id); }
+
+  function updateScope() {
+    const n = selectedIds().length;
+    $("scope").textContent = docs.length === 0 ? "" : n === docs.length ? `Searching all ${docs.length} document${docs.length === 1 ? "" : "s"}` : `Searching ${n} of ${docs.length} documents`;
+  }
+
+  function renderDocs() {
+    const list = $("docs");
+    list.replaceChildren();
+    $("empty").hidden = docs.length > 0;
+    for (const d of docs) {
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = !skipped.has(d.doc_id);
+      box.addEventListener("change", () => { box.checked ? skipped.delete(d.doc_id) : skipped.add(d.doc_id); updateScope(); });
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = d.filename;
+      const label = document.createElement("label");
+      label.append(box, name);
+      const meta = document.createElement("span");
+      meta.className = "meta";
+      meta.textContent = `${d.pages} page${d.pages === 1 ? "" : "s"} · ${d.chunks} passages`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "plain";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => removeDoc(d));
+      const li = document.createElement("li");
+      li.append(label, meta, remove);
+      list.append(li);
+    }
+    updateScope();
+  }
+
+  async function loadDocs() {
+    docs = await call("/documents");
+    renderDocs();
+  }
+
+  async function upload(fileList) {
+    const files = Array.from(fileList);
+    if (files.length === 0) return;
+    const form = new FormData();
+    files.forEach((f) => form.append("files", f));
+    setMsg("upload-msg", `Reading ${files.length} file${files.length === 1 ? "" : "s"}…`);
+    try {
+      const result = await call("/documents", { method: "POST", body: form });
+      const problems = result.errors.map((e) => `${e.filename}: ${e.error}`);
+      setMsg("upload-msg", `Added ${result.added.length} document${result.added.length === 1 ? "" : "s"}.` + (problems.length ? " Skipped: " + problems.join("; ") : ""), problems.length ? "error" : "ok");
+      await loadDocs();
+    } catch (err) {
+      setMsg("upload-msg", err.message, "error");
+    } finally {
+      $("file").value = "";
+    }
+  }
+
+  async function removeDoc(doc) {
+    if (!confirm(`Remove "${doc.filename}" from the library?`)) return;
+    try {
+      await call(`/documents/${doc.doc_id}`, { method: "DELETE" });
+      skipped.delete(doc.doc_id);
+      await loadDocs();
+    } catch (err) {
+      setMsg("upload-msg", err.message, "error");
+    }
+  }
+
+  /* ---------- answers ---------- */
+
+  function sourcesBlock(sources) {
+    const details = document.createElement("details");
+    details.className = "sources";
+    const summary = document.createElement("summary");
+    summary.textContent = `Sources (${sources.length})`;
+    details.append(summary);
+    for (const s of sources) {
+      const row = document.createElement("div");
+      row.className = "src";
+      const head = document.createElement("div");
+      const num = document.createElement("strong");
+      num.textContent = `[${s.n}] `;
+      head.append(num, `${s.filename}, page ${s.page} · ${Math.round(s.score * 100)}% match`);
+      const excerpt = document.createElement("div");
+      excerpt.className = "excerpt";
+      excerpt.textContent = s.text;
+      row.append(head, excerpt);
+      details.append(row);
+    }
+    return details;
+  }
+
+  function addAnswer(question, text, sources, failed) {
+    const box = document.createElement("article");
+    box.className = "panel";
+    const q = document.createElement("p");
+    q.className = "q";
+    q.textContent = question;
+    const a = document.createElement("div");
+    a.className = "a" + (failed ? " failed" : "");
+    if (failed) a.textContent = text; else a.innerHTML = renderMarkdown(text);
+    box.append(q, a);
+    if (sources && sources.length) box.append(sourcesBlock(sources));
+    $("answers").prepend(box);
+  }
+
+  async function ask() {
+    const question = $("question").value.trim();
+    if (!question) return;
+    const ids = selectedIds();
+    if (docs.length > 0 && ids.length === 0) { setMsg("ask-msg", "Tick at least one document to search.", "error"); return; }
+    $("ask").disabled = true;
+    setMsg("ask-msg", "Searching and reading the best passages…");
+    try {
+      const data = await call("/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, doc_ids: ids }),
+      });
+      addAnswer(question, data.answer, data.sources, false);
+      $("question").value = "";
+      setMsg("ask-msg", "");
+    } catch (err) {
+      addAnswer(question, err.message, null, true);
+      setMsg("ask-msg", "");
+    } finally {
+      $("ask").disabled = false;
+    }
+  }
+
+  $("file").addEventListener("change", (e) => upload(e.target.files));
+  $("drop").addEventListener("dragover", (e) => { e.preventDefault(); $("drop").classList.add("over"); });
+  $("drop").addEventListener("dragleave", () => $("drop").classList.remove("over"));
+  $("drop").addEventListener("drop", (e) => { e.preventDefault(); $("drop").classList.remove("over"); upload(e.dataTransfer.files); });
+  $("ask").addEventListener("click", ask);
+  $("question").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } });
+
+  checkHealth();
+  loadDocs().catch(() => {});
+</script>
+</body>
+</html>
